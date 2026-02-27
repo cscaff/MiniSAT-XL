@@ -341,10 +341,21 @@ inline void Solver::claBumpActivity (Clause& c) {
                 ca[learnts[i]].activity() *= 1e-20;
             cla_inc *= 1e-20; } }
 
-inline void Solver::checkGarbage(void){ return checkGarbage(garbage_frac); }
+inline void Solver::checkGarbage(void){
+#ifdef HW_BCP_SIM
+    return;
+#else
+    return checkGarbage(garbage_frac);
+#endif
+}
 inline void Solver::checkGarbage(double gf){
+#ifdef HW_BCP_SIM
+    return;
+#else
     if (ca.wasted() > ca.size() * gf)
-        garbageCollect(); }
+        garbageCollect();
+#endif
+}
 
 // NOTE: enqueue does not set the ok flag! (only public methods do)
 inline bool     Solver::enqueue         (Lit p, CRef from)      { return value(p) != l_Undef ? value(p) != l_False : (uncheckedEnqueue(p, from), true); }

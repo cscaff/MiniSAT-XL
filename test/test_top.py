@@ -12,6 +12,7 @@ Verifies:
   4. Satisfied clause (sat_bit): no implication, no conflict, done.
   5. Sequential BCP calls accumulate implications in the FIFO.
   6. Multi-clause watch list (3 clauses) with backpressure -> 3 implications.
+  7. Writeback updates assignment memory before software pops FIFO.
 """
 
 import os
@@ -235,6 +236,38 @@ def test_bcp_accelerator():
 
         assert ctx.get(dut.impl_valid) == 0, "Test 6 FAIL: FIFO should be empty"
         print("Test 6 PASSED: Multi-clause watch list (3 clauses) -> 3 implications.")
+
+        # ---- Test 7: Writeback updates assignment memory ----
+        while ctx.get(dut.impl_valid):
+            await pop_implication()
+
+        await write_assign(0, TRUE)        # a = TRUE -> ~a is false
+        await write_assign(1, UNASSIGNED)  # b unassigned
+        await start_bcp(false_lit=1)       # clause 0: (~a v b) -> implies b=TRUE
+        await wait_done()
+        assert ctx.get(dut.conflict) == 0, "Test 7 FAIL: unexpected conflict on first BCP"
+        await ctx.tick()
+
+        await write_clause(20, sat_bit=0, size=2, lits=[2, 4, 0, 0, 0])  # (b v c)
+        await write_watch_list(4, [20])  # false_lit=4 corresponds to c positive
+        await write_assign(2, FALSE)     # c = FALSE -> false_lit=4
+
+        await start_bcp(false_lit=4)
+        await wait_done()
+        assert ctx.get(dut.conflict) == 0, "Test 7 FAIL: unexpected conflict on second BCP"
+        await ctx.tick()
+
+        assert ctx.get(dut.impl_valid) == 1, "Test 7 FAIL: missing implication in FIFO"
+        imp = await pop_implication()
+        assert imp["var"] == 1 and imp["value"] == 1, (
+            f"Test 7 FAIL: expected b=TRUE from first BCP, got var={imp['var']} val={imp['value']}"
+        )
+        for _ in range(3):
+            if ctx.get(dut.impl_valid):
+                break
+            await ctx.tick()
+        assert ctx.get(dut.impl_valid) == 0, "Test 7 FAIL: writeback did not prevent re-implication"
+        print("Test 7 PASSED: Writeback updates assignment memory before software pop.")
 
         print("\nAll tests PASSED.")
 

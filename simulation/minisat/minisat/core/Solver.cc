@@ -296,8 +296,13 @@ void Solver::removeClause(CRef cr) {
             HWBCPSim::disableClause(it->second);
     }
 #endif
-    c.mark(1); 
+#ifdef HW_BCP_SIM
+    c.mark(1);
+    return;
+#else
+    c.mark(1);
     ca.free(cr);
+#endif
 }
 
 
@@ -1189,6 +1194,9 @@ void Solver::relocAll(ClauseAllocator& to)
 
 void Solver::garbageCollect()
 {
+#ifdef HW_BCP_SIM
+    return;
+#endif
     // Initialize the next region to a size corresponding to the estimated utilization degree. This
     // is not precise but should avoid some unnecessary reallocations for the new region:
     ClauseAllocator to(ca.size() - ca.wasted()); 
