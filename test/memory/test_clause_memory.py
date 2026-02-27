@@ -147,7 +147,7 @@ def test_clause_memory():
         print("\nAll tests PASSED.")
 
     sim.add_testbench(testbench)
-    vcd_path = os.path.join(REPO_ROOT, "unit_tests", "logs", "clause_memory.vcd")
+    vcd_path = os.path.join(REPO_ROOT, "test", "logs", "clause_memory.vcd")
     with sim.write_vcd(vcd_path):
         sim.run()
 

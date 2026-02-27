@@ -184,7 +184,7 @@ def test_clause_evaluator():
         print("\nAll tests PASSED.")
 
     sim.add_testbench(testbench)
-    vcd_path = os.path.join(REPO_ROOT, "unit_tests", "logs", "clause_evaluator.vcd")
+    vcd_path = os.path.join(REPO_ROOT, "test", "logs", "clause_evaluator.vcd")
     with sim.write_vcd(vcd_path):
         sim.run()
 

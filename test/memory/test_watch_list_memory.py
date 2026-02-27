@@ -146,7 +146,7 @@ def test_watch_list_memory():
         print("\nAll tests PASSED.")
 
     sim.add_testbench(testbench)
-    vcd_path = os.path.join(REPO_ROOT, "unit_tests", "logs", "watch_list_memory.vcd")
+    vcd_path = os.path.join(REPO_ROOT, "test", "logs", "watch_list_memory.vcd")
     with sim.write_vcd(vcd_path):
         sim.run()
 

@@ -239,7 +239,7 @@ def test_bcp_accelerator():
         print("\nAll tests PASSED.")
 
     sim.add_testbench(testbench)
-    vcd_path = os.path.join(REPO_ROOT, "unit_tests", "logs", "bcp_accelerator.vcd")
+    vcd_path = os.path.join(REPO_ROOT, "test", "logs", "bcp_accelerator.vcd")
     with sim.write_vcd(vcd_path):
         sim.run()
 
