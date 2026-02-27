@@ -134,9 +134,19 @@ class _BCPSim:
         ctx.set(dut.impl_ready, 0)
         return var, value, reason
 
-    async def _run_bcp(self, ctx, dut, false_lit):
+    async def _run_bcp(self, ctx, dut, false_lit, max_cycles=10000):
         await self._start_bcp(ctx, dut, false_lit)
-        await self._wait_done(ctx, dut)
+
+        # Wait for BCP + WRITEBACK to complete without popping from the FIFO.
+        # Leaving implications in the FIFO during ACTIVE guarantees impl_count > 0
+        # when ACTIVE finishes, so the hardware always enters WRITEBACK and writes
+        # every implication into assign_mem automatically before we read them.
+        for _ in range(max_cycles):
+            if ctx.get(dut.done):
+                break
+            await ctx.tick()
+        else:
+            raise RuntimeError(f"BCP timed out after {max_cycles} cycles")
 
         conflict_cid = -1
         if ctx.get(dut.conflict):
@@ -146,7 +156,8 @@ class _BCPSim:
             ctx.set(dut.conflict_ack, 0)
             await ctx.tick()  # DONE -> IDLE
 
-        # Drain implications
+        # Drain implications after WRITEBACK has updated assign_mem.
+        # Each item appears exactly once: WRITEBACK re-pushed it, this drain pops it.
         implications = []
         while ctx.get(dut.impl_valid):
             var, value, reason = await self._pop_implication(ctx, dut)

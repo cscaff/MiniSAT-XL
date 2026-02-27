@@ -223,10 +223,10 @@ protected:
 
 #ifdef HW_BCP_SIM
     bool                hw_bcp_initialized;
-    bool                hw_bcp_enabled;
     int                 hw_next_clause_id;
     vec<CRef>           hw_clause_id_to_cref;
     std::unordered_map<CRef, int> hw_cref_to_clause_id;
+    vec<char>          hw_decision_flip;
 
     void    hw_bcp_init();
     int     hw_register_clause(CRef cr);

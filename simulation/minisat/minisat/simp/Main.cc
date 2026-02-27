@@ -25,7 +25,11 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #include "minisat/utils/ParseUtils.h"
 #include "minisat/utils/Options.h"
 #include "minisat/core/Dimacs.h"
+#ifdef HW_BCP_SIM
+#include "minisat/core/Solver.h"
+#else
 #include "minisat/simp/SimpSolver.h"
+#endif
 
 using namespace Minisat;
 
@@ -69,10 +73,16 @@ int main(int argc, char** argv)
 
         parseOptions(argc, argv, true);
         
+#ifdef HW_BCP_SIM
+        Solver      S;
+#else
         SimpSolver  S;
+#endif
         double      initial_time = cpuTime();
 
+#ifndef HW_BCP_SIM
         if (!pre) S.eliminate(true);
+#endif
 
         S.verbosity = verb;
         
@@ -112,7 +122,11 @@ int main(int argc, char** argv)
         // voluntarily:
         sigTerm(SIGINT_interrupt);
 
+#ifndef HW_BCP_SIM
         S.eliminate(true);
+#else
+        S.simplify();
+#endif
         double simplified_time = cpuTime();
         if (S.verbosity > 0){
             printf("|  Simplification time:  %12.2f s                                       |\n", simplified_time - parsed_time);

@@ -107,7 +107,6 @@ Solver::Solver() :
   , asynch_interrupt   (false)
 #ifdef HW_BCP_SIM
   , hw_bcp_initialized (false)
-  , hw_bcp_enabled     (false)
   , hw_next_clause_id  (0)
 #endif
 {}
@@ -155,10 +154,8 @@ int Solver::hw_register_clause(CRef cr)
     }
 
     Clause& c = ca[cr];
-    if (c.size() > HW_MAX_K){
-        fprintf(stderr, "HW BCP: clause size exceeds MAX_K=%d\n", HW_MAX_K);
-        exit(1);
-    }
+    if (c.size() > HW_MAX_K)
+        return -1;
 
     vec<Lit> lits;
     for (int i = 0; i < c.size(); i++)
@@ -175,12 +172,12 @@ CRef Solver::hw_clause_cref(int clause_id) const
 {
     if (clause_id < 0 || clause_id >= hw_clause_id_to_cref.size()){
         fprintf(stderr, "HW BCP: invalid clause id %d\n", clause_id);
-        return CRef_Undef;
+        exit(1);
     }
     CRef cr = hw_clause_id_to_cref[clause_id];
     if (cr == CRef_Undef || cr >= ca.size()){
         fprintf(stderr, "HW BCP: invalid clause cref for id %d\n", clause_id);
-        return CRef_Undef;
+        exit(1);
     }
     return cr;
 }
@@ -302,8 +299,6 @@ void Solver::removeClause(CRef cr) {
         if (it != hw_cref_to_clause_id.end())
             HWBCPSim::disableClause(it->second);
     }
-#endif
-#ifdef HW_BCP_SIM
     c.mark(1);
     return;
 #else
@@ -425,6 +420,10 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         while (!seen[var(trail[index--])]);
         p     = trail[index+1];
         confl = reason(var(p));
+#ifdef HW_BCP_SIM
+        if (confl == CRef_Undef)
+            pathC = 0;
+#endif
         seen[var(p)] = 0;
         pathC--;
 
@@ -583,10 +582,6 @@ void Solver::analyzeFinal(Lit p, LSet& out_conflict)
 
 void Solver::uncheckedEnqueue(Lit p, CRef from)
 {
-#ifdef HW_BCP_SIM
-    if (value(p) != l_Undef)
-        return;
-#endif
     assert(value(p) == l_Undef);
     assigns[var(p)] = lbool(!sign(p));
     vardata[var(p)] = mkVarData(from, decisionLevel());
@@ -674,8 +669,6 @@ CRef Solver::propagateSW()
 CRef Solver::propagate()
 {
 #ifdef HW_BCP_SIM
-    if (!hw_bcp_enabled)
-        return propagateSW();
     if (!hw_bcp_initialized)
         hw_bcp_init();
 
@@ -693,21 +686,49 @@ CRef Solver::propagate()
 
         for (int i = 0; i < impls.size(); i++){
             Var v = impls[i].var;
+            if (v < 0 || v >= nVars()){
+                fprintf(stderr, "HW BCP: implied var %d out of range (nVars=%d)\n", v, nVars());
+                exit(1);
+            }
             lbool val = impls[i].value ? l_True : l_False;
             if (value(v) == l_Undef){
                 Lit lit = mkLit(v, val == l_False);
                 CRef reason = hw_clause_cref(impls[i].reason_id);
                 if (reason == CRef_Undef){
-                    hw_bcp_enabled = false;
-                    return propagateSW();
+                    fprintf(stderr, "HW BCP: invalid reason id %d\n", impls[i].reason_id);
+                    exit(1);
                 }
-                uncheckedEnqueue(lit, reason);
+                Clause& rc = ca[reason];
+                CRef reason_ref = reason;
+                if (rc[0] != lit){
+                    vec<Lit> tmp;
+                    tmp.push(lit);
+                    for (int k = 0; k < rc.size(); k++)
+                        if (rc[k] != lit)
+                            tmp.push(rc[k]);
+                    reason_ref = ca.alloc(tmp, false);
+                }
+                if (!enqueue(lit, reason_ref)){
+                    confl = reason;
+                    qhead = trail.size();
+                    break;
+                }
             }else if (value(v) != val){
                 CRef conflict_reason = hw_clause_cref(impls[i].reason_id);
                 if (conflict_reason == CRef_Undef){
-                    hw_bcp_enabled = false;
-                    return propagateSW();
+                    fprintf(stderr, "HW BCP: invalid conflict reason id %d\n", impls[i].reason_id);
+                    exit(1);
                 }
+                Clause& rc = ca[conflict_reason];
+                bool conflict = true;
+                for (int k = 0; k < rc.size(); k++){
+                    if (value(rc[k]) != l_False){
+                        conflict = false;
+                        break;
+                    }
+                }
+                if (!conflict)
+                    continue;
                 confl = conflict_reason;
                 qhead = trail.size();
                 break;
@@ -720,12 +741,80 @@ CRef Solver::propagate()
         if (conflict_id >= 0){
             CRef conflict_cref = hw_clause_cref(conflict_id);
             if (conflict_cref == CRef_Undef){
-                hw_bcp_enabled = false;
-                return propagateSW();
+                fprintf(stderr, "HW BCP: invalid conflict id %d\n", conflict_id);
+                exit(1);
             }
+            Clause& rc = ca[conflict_cref];
+            bool conflict = true;
+            for (int k = 0; k < rc.size(); k++){
+                if (value(rc[k]) != l_False){
+                    conflict = false;
+                    break;
+                }
+            }
+            if (!conflict)
+                continue;
             confl = conflict_cref;
             qhead = trail.size();
             break;
+        }
+
+        // Software-only propagation for clauses not registered in HW.
+        {
+            vec<Watcher>&  ws  = watches.lookup(p);
+            Watcher        *i, *j, *end;
+            for (i = j = (Watcher*)ws, end = i + ws.size();  i != end;){
+                CRef cr = i->cref;
+                if (hw_cref_to_clause_id.find(cr) != hw_cref_to_clause_id.end()){
+                    *j++ = *i++; continue;
+                }
+
+                // Try to avoid inspecting the clause:
+                Lit blocker = i->blocker;
+                if (value(blocker) == l_True){
+                    *j++ = *i++; continue; }
+
+                // Make sure the false literal is data[1]:
+                Clause&  c         = ca[cr];
+                Lit      false_lit = ~p;
+                if (c[0] == false_lit)
+                    c[0] = c[1], c[1] = false_lit;
+                assert(c[1] == false_lit);
+                i++;
+
+                // If 0th watch is true, then clause is already satisfied.
+                Lit     first = c[0];
+                Watcher w     = Watcher(cr, first);
+                if (first != blocker && value(first) == l_True){
+                    *j++ = w; continue; }
+
+                // Look for new watch:
+                for (int k = 2; k < c.size(); k++)
+                    if (value(c[k]) != l_False){
+                        c[1] = c[k]; c[k] = false_lit;
+                        watches[~c[1]].push(w);
+                        goto NextClause; }
+
+                // Did not find watch -- clause is unit under assignment:
+                *j++ = w;
+                if (value(first) == l_False){
+                    confl = cr;
+                    qhead = trail.size();
+                    // Copy the remaining watches:
+                    while (i < end)
+                        *j++ = *i++;
+                }else{
+                    if (!enqueue(first, cr)){
+                        confl = cr;
+                        qhead = trail.size();
+                    }
+                }
+
+            NextClause:;
+            }
+            ws.shrink(i - j);
+            if (confl != CRef_Undef)
+                break;
         }
     }
 
@@ -755,11 +844,7 @@ struct reduceDB_lt {
 void Solver::reduceDB()
 {
 #ifdef HW_BCP_SIM
-    int k = 0;
-    for (int i = 0; i < learnts.size(); i++)
-        if (ca[learnts[i]].learnt())
-            learnts[k++] = learnts[i];
-    learnts.shrink(learnts.size() - k);
+    return;
 #endif
     int     i, j;
     double  extra_lim = cla_inc / learnts.size();    // Remove any clause below this activity
@@ -828,6 +913,12 @@ bool Solver::simplify()
 
     if (nAssigns() == simpDB_assigns || (simpDB_props > 0))
         return true;
+#ifdef HW_BCP_SIM
+    rebuildOrderHeap();
+    simpDB_assigns = nAssigns();
+    simpDB_props   = clauses_literals + learnts_literals;
+    return true;
+#endif
 
     // Remove satisfied clauses:
     removeSatisfied(learnts);
@@ -892,21 +983,37 @@ lbool Solver::search(int nof_conflicts)
         CRef confl = propagate();
         if (confl != CRef_Undef){
             // CONFLICT
+#ifdef HW_BCP_SIM
             conflicts++; conflictC++;
             if (decisionLevel() == 0) return l_False;
-
+            Lit decision_lit = trail[trail_lim.last()];
+            bool flipped = hw_decision_flip.last();
+            cancelUntil(decisionLevel() - 1);
+            hw_decision_flip.pop();
+            if (!flipped){
+                newDecisionLevel();
+                hw_decision_flip.push(1);
+                if (!enqueue(~decision_lit))
+                    return l_False;
+            }
+            continue;
+#endif
+            conflicts++; conflictC++;
+            if (decisionLevel() == 0) return l_False;
             learnt_clause.clear();
             analyze(confl, learnt_clause, backtrack_level);
             cancelUntil(backtrack_level);
 
             if (learnt_clause.size() == 1){
-                uncheckedEnqueue(learnt_clause[0]);
+                if (!enqueue(learnt_clause[0]))
+                    return l_False;
             }else{
                 CRef cr = ca.alloc(learnt_clause, true);
                 learnts.push(cr);
                 attachClause(cr);
                 claBumpActivity(ca[cr]);
-                uncheckedEnqueue(learnt_clause[0], cr);
+                if (!enqueue(learnt_clause[0], cr))
+                    return l_False;
             }
 
             varDecayActivity();
@@ -968,7 +1075,11 @@ lbool Solver::search(int nof_conflicts)
 
             // Increase decision level and enqueue 'next'
             newDecisionLevel();
-            uncheckedEnqueue(next);
+#ifdef HW_BCP_SIM
+            hw_decision_flip.push(0);
+#endif
+            if (!enqueue(next))
+                return l_False;
         }
     }
 }
@@ -1019,10 +1130,6 @@ static double luby(double y, int x){
 // NOTE: assumptions passed in member-variable 'assumptions'.
 lbool Solver::solve_()
 {
-#ifdef HW_BCP_SIM
-    const char* hw_env = getenv("HW_BCP_SIM_ENABLE");
-    hw_bcp_enabled = (hw_env && hw_env[0] == '1');
-#endif
     model.clear();
     conflict.clear();
     if (!ok) return l_False;
@@ -1239,9 +1346,7 @@ void Solver::relocAll(ClauseAllocator& to)
 
 void Solver::garbageCollect()
 {
-#ifdef HW_BCP_SIM
     return;
-#endif
     // Initialize the next region to a size corresponding to the estimated utilization degree. This
     // is not precise but should avoid some unnecessary reallocations for the new region:
     ClauseAllocator to(ca.size() - ca.wasted()); 
