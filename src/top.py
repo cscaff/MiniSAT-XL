@@ -22,10 +22,10 @@ from memory.watch_list_memory import (WatchListMemory, NUM_LITERALS,
                                       MAX_WATCH_LEN, CLAUSE_ID_WIDTH, LENGTH_WIDTH)
 from memory.assignment_memory import AssignmentMemory, MAX_VARS
 
-from .watch_list_manager import WatchListManager
-from .clause_prefetcher import ClausePrefetcher
-from .clause_evaluator import ClauseEvaluator, UNIT, CONFLICT
-from .implication_fifo import ImplicationFIFO
+from submodules.watch_list_manager import WatchListManager
+from submodules.clause_prefetcher import ClausePrefetcher
+from submodules.clause_evaluator import ClauseEvaluator, UNIT, CONFLICT
+from submodules.implication_FIFO import ImplicationFIFO
 
 
 class BCPAccelerator(Elaboratable):
