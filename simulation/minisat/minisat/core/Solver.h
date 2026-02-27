@@ -223,6 +223,7 @@ protected:
 
 #ifdef HW_BCP_SIM
     bool                hw_bcp_initialized;
+    bool                hw_bcp_enabled;
     int                 hw_next_clause_id;
     vec<CRef>           hw_clause_id_to_cref;
     std::unordered_map<CRef, int> hw_cref_to_clause_id;
@@ -257,6 +258,7 @@ protected:
     void     newDecisionLevel ();                                                      // Begins a new decision level.
     void     uncheckedEnqueue (Lit p, CRef from = CRef_Undef);                         // Enqueue a literal. Assumes value of literal is undefined.
     bool     enqueue          (Lit p, CRef from = CRef_Undef);                         // Test if fact 'p' contradicts current state, enqueue otherwise.
+    CRef     propagateSW      ();                                                      // Software propagation (two-watched).
     CRef     propagate        ();                                                      // Perform unit propagation. Returns possibly conflicting clause.
     void     cancelUntil      (int level);                                             // Backtrack until a certain level.
     void     analyze          (CRef confl, vec<Lit>& out_learnt, int& out_btlevel);    // (bt = backtrack)

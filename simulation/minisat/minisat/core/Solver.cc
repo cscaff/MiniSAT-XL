@@ -19,6 +19,7 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 **************************************************************************************************/
 
 #include <math.h>
+#include <stdlib.h>
 
 #include "minisat/mtl/Alg.h"
 #include "minisat/mtl/Sort.h"
@@ -106,6 +107,7 @@ Solver::Solver() :
   , asynch_interrupt   (false)
 #ifdef HW_BCP_SIM
   , hw_bcp_initialized (false)
+  , hw_bcp_enabled     (false)
   , hw_next_clause_id  (0)
 #endif
 {}
@@ -173,9 +175,14 @@ CRef Solver::hw_clause_cref(int clause_id) const
 {
     if (clause_id < 0 || clause_id >= hw_clause_id_to_cref.size()){
         fprintf(stderr, "HW BCP: invalid clause id %d\n", clause_id);
-        exit(1);
+        return CRef_Undef;
     }
-    return hw_clause_id_to_cref[clause_id];
+    CRef cr = hw_clause_id_to_cref[clause_id];
+    if (cr == CRef_Undef || cr >= ca.size()){
+        fprintf(stderr, "HW BCP: invalid clause cref for id %d\n", clause_id);
+        return CRef_Undef;
+    }
+    return cr;
 }
 #endif
 
@@ -576,6 +583,10 @@ void Solver::analyzeFinal(Lit p, LSet& out_conflict)
 
 void Solver::uncheckedEnqueue(Lit p, CRef from)
 {
+#ifdef HW_BCP_SIM
+    if (value(p) != l_Undef)
+        return;
+#endif
     assert(value(p) == l_Undef);
     assigns[var(p)] = lbool(!sign(p));
     vardata[var(p)] = mkVarData(from, decisionLevel());
@@ -587,63 +598,9 @@ void Solver::uncheckedEnqueue(Lit p, CRef from)
 }
 
 
-/*_________________________________________________________________________________________________
-|
-|  propagate : [void]  ->  [Clause*]
-|  
-|  Description:
-|    Propagates all enqueued facts. If a conflict arises, the conflicting clause is returned,
-|    otherwise CRef_Undef.
-|  
-|    Post-conditions:
-|      * the propagation queue is empty, even if there was a conflict.
-|________________________________________________________________________________________________@*/
-CRef Solver::propagate()
+// Software propagation (two-watched literals)
+CRef Solver::propagateSW()
 {
-#ifdef HW_BCP_SIM
-    if (!hw_bcp_initialized)
-        hw_bcp_init();
-
-    CRef    confl     = CRef_Undef;
-    int     num_props = 0;
-    vec<HWImplication> impls;
-
-    while (qhead < trail.size()){
-        Lit p = trail[qhead++];
-        num_props++;
-
-        int false_lit = toInt(p) ^ 1;
-        int conflict_id = -1;
-        HWBCPSim::runBCP(false_lit, impls, conflict_id);
-
-        for (int i = 0; i < impls.size(); i++){
-            Var v = impls[i].var;
-            lbool val = impls[i].value ? l_True : l_False;
-            if (value(v) == l_Undef){
-                Lit lit = mkLit(v, val == l_False);
-                CRef reason = hw_clause_cref(impls[i].reason_id);
-                uncheckedEnqueue(lit, reason);
-            }else if (value(v) != val){
-                confl = hw_clause_cref(impls[i].reason_id);
-                qhead = trail.size();
-                break;
-            }
-        }
-
-        if (confl != CRef_Undef)
-            break;
-
-        if (conflict_id >= 0){
-            confl = hw_clause_cref(conflict_id);
-            qhead = trail.size();
-            break;
-        }
-    }
-
-    propagations += num_props;
-    simpDB_props -= num_props;
-    return confl;
-#else
     CRef    confl     = CRef_Undef;
     int     num_props = 0;
 
@@ -700,6 +657,83 @@ CRef Solver::propagate()
     simpDB_props -= num_props;
 
     return confl;
+}
+
+
+/*_________________________________________________________________________________________________
+|
+|  propagate : [void]  ->  [Clause*]
+|  
+|  Description:
+|    Propagates all enqueued facts. If a conflict arises, the conflicting clause is returned,
+|    otherwise CRef_Undef.
+|  
+|    Post-conditions:
+|      * the propagation queue is empty, even if there was a conflict.
+|________________________________________________________________________________________________@*/
+CRef Solver::propagate()
+{
+#ifdef HW_BCP_SIM
+    if (!hw_bcp_enabled)
+        return propagateSW();
+    if (!hw_bcp_initialized)
+        hw_bcp_init();
+
+    CRef    confl     = CRef_Undef;
+    int     num_props = 0;
+    vec<HWImplication> impls;
+
+    while (qhead < trail.size()){
+        Lit p = trail[qhead++];
+        num_props++;
+
+        int false_lit = toInt(p) ^ 1;
+        int conflict_id = -1;
+        HWBCPSim::runBCP(false_lit, impls, conflict_id);
+
+        for (int i = 0; i < impls.size(); i++){
+            Var v = impls[i].var;
+            lbool val = impls[i].value ? l_True : l_False;
+            if (value(v) == l_Undef){
+                Lit lit = mkLit(v, val == l_False);
+                CRef reason = hw_clause_cref(impls[i].reason_id);
+                if (reason == CRef_Undef){
+                    hw_bcp_enabled = false;
+                    return propagateSW();
+                }
+                uncheckedEnqueue(lit, reason);
+            }else if (value(v) != val){
+                CRef conflict_reason = hw_clause_cref(impls[i].reason_id);
+                if (conflict_reason == CRef_Undef){
+                    hw_bcp_enabled = false;
+                    return propagateSW();
+                }
+                confl = conflict_reason;
+                qhead = trail.size();
+                break;
+            }
+        }
+
+        if (confl != CRef_Undef)
+            break;
+
+        if (conflict_id >= 0){
+            CRef conflict_cref = hw_clause_cref(conflict_id);
+            if (conflict_cref == CRef_Undef){
+                hw_bcp_enabled = false;
+                return propagateSW();
+            }
+            confl = conflict_cref;
+            qhead = trail.size();
+            break;
+        }
+    }
+
+    propagations += num_props;
+    simpDB_props -= num_props;
+    return confl;
+#else
+    return propagateSW();
 #endif
 }
 
@@ -720,6 +754,13 @@ struct reduceDB_lt {
 };
 void Solver::reduceDB()
 {
+#ifdef HW_BCP_SIM
+    int k = 0;
+    for (int i = 0; i < learnts.size(); i++)
+        if (ca[learnts[i]].learnt())
+            learnts[k++] = learnts[i];
+    learnts.shrink(learnts.size() - k);
+#endif
     int     i, j;
     double  extra_lim = cla_inc / learnts.size();    // Remove any clause below this activity
 
@@ -978,6 +1019,10 @@ static double luby(double y, int x){
 // NOTE: assumptions passed in member-variable 'assumptions'.
 lbool Solver::solve_()
 {
+#ifdef HW_BCP_SIM
+    const char* hw_env = getenv("HW_BCP_SIM_ENABLE");
+    hw_bcp_enabled = (hw_env && hw_env[0] == '1');
+#endif
     model.clear();
     conflict.clear();
     if (!ok) return l_False;
