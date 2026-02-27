@@ -70,6 +70,18 @@ def sanitize_dimacs(path):
     return out_path
 
 
+def find_venv_site_packages(repo_root):
+    venv = repo_root / ".venv"
+    lib_dir = venv / "lib"
+    if not lib_dir.exists():
+        return None
+    for py_dir in sorted(lib_dir.glob("python*")):
+        site_packages = py_dir / "site-packages"
+        if site_packages.exists():
+            return str(site_packages)
+    return None
+
+
 def satisfies(clauses, model):
     if model is None:
         return False
@@ -153,6 +165,10 @@ def main():
 
     env_hw = os.environ.copy()
     env_hw["MINISAT_ACCEL_ROOT"] = str(repo_root)
+    venv_site = find_venv_site_packages(repo_root)
+    if venv_site:
+        existing = env_hw.get("PYTHONPATH", "")
+        env_hw["PYTHONPATH"] = venv_site + (os.pathsep + existing if existing else "")
 
     families = ["uf50-218", "uuf50-218"]
     total = 0

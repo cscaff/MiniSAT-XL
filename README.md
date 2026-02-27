@@ -25,3 +25,13 @@ Run:
 Notes:
 - The embedded Python must have `amaranth` available.
 - If Python link flags fail, try `PYTHON_CONFIG="python3-config --embed"`.
+
+## Benchmark comparison (software vs HW sim)
+Run a small comparison suite on uf50-218 and uuf50-218:
+
+```
+python3 benchmarks/run_hw_bcp_compare.py --per-family 20
+```
+
+This will build two MiniSAT binaries (software + HW_BCP_SIM) and compare
+SAT/UNSAT plus model satisfaction, while also reporting bit-for-bit model mismatches.

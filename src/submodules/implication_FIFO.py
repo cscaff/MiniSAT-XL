@@ -178,19 +178,15 @@ See: Hardware Description/BCP_Accelerator_System_Architecture.md, Memory Module 
 
 from amaranth import *
 from amaranth.lib.fifo import SyncFIFO
-from amaranth.lib.data import StructLayout
 
 from memory.assignment_memory import MAX_VARS
 from memory.clause_memory import MAX_CLAUSES
 
 
-# Entry layout: var_id (9-bit) + value (1-bit) + reason (13-bit) = 23 bits
-# Using Amaranth StructLayout for clean packing
-ImplicationEntry = StructLayout({
-    "var_id": unsigned(9),      # [0:9]
-    "value": unsigned(1),       # [9]
-    "reason": unsigned(13),     # [10:23]
-})
+# Entry layout: var_id + value + reason
+VAR_ID_WIDTH = (MAX_VARS - 1).bit_length()
+REASON_WIDTH = (MAX_CLAUSES - 1).bit_length()
+ENTRY_WIDTH = VAR_ID_WIDTH + 1 + REASON_WIDTH
 
 DEFAULT_FIFO_DEPTH = 128
 
@@ -278,42 +274,37 @@ class ImplicationFIFO(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        # Instantiate SyncFIFO with our entry structure
+        # Instantiate SyncFIFO with packed entry width
         m.submodules.fifo = fifo = SyncFIFO(
-            shape=ImplicationEntry,
+            width=ENTRY_WIDTH,
             depth=self.fifo_depth,
-            init=[],
         )
 
         # --- Push side (from Clause Evaluator) ---
-        # Pack input signals into entry structure
-        push_entry = ImplicationEntry.const({
-            "var_id": self.push_var,
-            "value": self.push_value,
-            "reason": self.push_reason,
-        })
+        # Pack input signals into entry word
+        push_entry = Cat(self.push_var, self.push_value, self.push_reason)
 
         m.d.comb += [
             # Drive FIFO write interface
-            fifo.w_payload.eq(push_entry),
-            fifo.w_valid.eq(self.push_valid),
+            fifo.w_data.eq(push_entry),
+            fifo.w_en.eq(self.push_valid),
         ]
 
         # --- Pop side (to software) ---
-        # Unpack entry structure to output signals
+        # Unpack entry word to output signals
         m.d.comb += [
-            self.pop_var.eq(fifo.r_payload.var_id),
-            self.pop_value.eq(fifo.r_payload.value),
-            self.pop_reason.eq(fifo.r_payload.reason),
+            self.pop_var.eq(fifo.r_data[0:VAR_ID_WIDTH]),
+            self.pop_value.eq(fifo.r_data[VAR_ID_WIDTH]),
+            self.pop_reason.eq(fifo.r_data[VAR_ID_WIDTH + 1:ENTRY_WIDTH]),
             # Drive FIFO read interface
-            fifo.r_ready.eq(self.pop_ready),
+            fifo.r_en.eq(self.pop_ready),
         ]
 
         # --- Status signals ---
         m.d.comb += [
-            self.pop_valid.eq(fifo.r_valid),
-            self.fifo_empty.eq(~fifo.r_valid),
-            self.fifo_full.eq(~fifo.w_ready),
+            self.pop_valid.eq(fifo.r_rdy),
+            self.fifo_empty.eq(~fifo.r_rdy),
+            self.fifo_full.eq(~fifo.w_rdy),
         ]
 
         return m
