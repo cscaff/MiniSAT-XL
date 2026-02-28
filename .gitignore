@@ -3,3 +3,4 @@
 __pycache__/
 simulation/minisat/build*/
 *.vcd
+_codeql_detected_source_root
