@@ -78,3 +78,80 @@ Here's a summary of the work from the previous session:
 
   In short: yes, the fix belongs in src/top.py — wire an automatic assign_mem write whenever the evaluator
   pushes a UNIT result to the FIFO. One mux, no new FSM states, no re-pushing to FIFO.
+
+
+  Solution:
+
+  es, and it's actually a very clean fit with your current pipeline. Let me trace the timing carefully.
+
+  Cycle-by-Cycle Timing
+
+  Your evaluator FSM is already sequential per clause: IDLE → EVAL → OUTPUT → IDLE. That one-cycle IDLE gap between clauses
+  is exactly what makes this safe:
+
+  Cycle T:   Evaluator in OUTPUT (Clause A → UNIT, implies var X=TRUE)
+             → result_ready fires → FIFO push
+             → simultaneously: assign_mem write queued (synchronous, takes effect at end of T)
+
+  Cycle T+1: Evaluator back in IDLE
+             → assign_mem now shows var X = TRUE  ✓
+             → Prefetcher presents Clause B, evaluator latches it
+             → transitions to EVAL at end of T+1
+
+  Cycle T+2: Evaluator in EVAL for Clause B
+             → reads assign_mem for lit0 → sees var X = TRUE  ✓
+
+  The sync write settles at T+1. The EVAL read happens at T+2 at earliest. No stall, no conflict, zero pipeline disturbance.
+
+  What the Change Looks Like in top.py
+
+  Replace the current assign_mem wiring at the bottom of top.py:
+
+  # Current (host-only writes):
+  m.d.comb += [
+      assign_mem.wr_addr.eq(self.assign_wr_addr),
+      assign_mem.wr_data.eq(self.assign_wr_data),
+      assign_mem.wr_en.eq(self.assign_wr_en),
+  ]
+
+  With a mux that auto-writes on FIFO push:
+
+  impl_push = (
+      evaluator.result_valid
+      & (evaluator.result_status == UNIT)
+      & evaluator.result_ready
+  )
+
+  auto_wr_data = Signal(2)
+  m.d.comb += auto_wr_data.eq(Mux(evaluator.result_implied_val, TRUE, FALSE))
+
+  # Auto-writeback takes priority over host writes (host only writes between BCP rounds)
+  with m.If(impl_push):
+      m.d.comb += [
+          assign_mem.wr_en.eq(1),
+          assign_mem.wr_addr.eq(evaluator.result_implied_var),
+          assign_mem.wr_data.eq(auto_wr_data),
+      ]
+  with m.Else():
+      m.d.comb += [
+          assign_mem.wr_en.eq(self.assign_wr_en),
+          assign_mem.wr_addr.eq(self.assign_wr_addr),
+          assign_mem.wr_data.eq(self.assign_wr_data),
+      ]
+
+  impl_push is already the exact signal used to drive impl_fifo.push_valid — you're just tapping it as a side-channel write.
+
+  Why This Doesn't Disturb the Pipeline
+
+  - No new FSM states — the write is a combinational side-effect of the existing FIFO push signal
+  - No backpressure change — result_ready is unchanged, so the evaluator's flow control is identical
+  - No host conflict — SW only calls hw_write_assignment between BCP rounds (outside ACTIVE state), so the two write sources
+  never compete
+  - Scales to future parallelism — if you later add a second evaluator PE, each PE's impl_push just needs to also write to
+  assign_mem; with two PEs you'd need a small arbitration mux, but the principle is identical
+
+  One Remaining Subtlety
+
+  This fixes intra-round stale reads. SW-side _implication_valid() can still serve as a correctness backstop for edge cases
+  (e.g. a conflict being reported for a variable that was just written this cycle but whose EVAL started one cycle before the
+   write). You likely won't need it after this fix, but it costs nothing to keep.

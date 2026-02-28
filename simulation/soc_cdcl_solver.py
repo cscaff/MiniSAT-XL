@@ -398,13 +398,13 @@ class CDCLSolver:
             result       = await hw_run_bcp(self.ctx, self.accel, false_lit)
             conflict_cid = result["conflict"]
 
-            # SW-verify the HW conflict: all literals must be FALSE.
             if conflict_cid >= 0:
-                c = self.clauses[conflict_cid]
-                if not all(self._lit_value(lit) == FALSE for lit in c.lits):
-                    conflict_cid = -1
-
-            if conflict_cid >= 0:
+                # Apply pending implications before verifying the conflict.
+                # HW auto-writeback keeps assign_mem current within a BCP round,
+                # but self.assigns lags until _enqueue is called.  Verifying the
+                # conflict clause against stale SW state would incorrectly discard
+                # genuine conflicts where the conflicting variable was implied
+                # earlier in the same round.
                 for var, value, reason in result["implications"]:
                     if self.assigns[var] != UNASSIGNED:
                         continue
@@ -412,6 +412,12 @@ class CDCLSolver:
                         continue
                     code = (var << 1) | (0 if value == 1 else 1)
                     await self._enqueue(code, reason)
+
+                # SW-verify the conflict with up-to-date self.assigns.
+                c = self.clauses[conflict_cid]
+                if not all(self._lit_value(lit) == FALSE for lit in c.lits):
+                    conflict_cid = -1
+
                 return conflict_cid
 
             sw_conflict = -1
