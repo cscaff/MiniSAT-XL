@@ -205,8 +205,6 @@ class BCPAccelerator(Elaboratable):
             evaluator.assign_rd_data.eq(assign_mem.rd_data),
         ]
 
-        # Clause Evaluator result_ready mux:
-        # UNIT results need FIFO space; others are always accepted
         evaluator_result_ready = Signal()
         with m.If(evaluator.result_status == UNIT):
             m.d.comb += evaluator_result_ready.eq(~impl_fifo.fifo_full)
@@ -262,34 +260,9 @@ class BCPAccelerator(Elaboratable):
 
         # (in_flight, wlm_done_seen, fsm_starting declared above)
 
-        # Implication FIFO tracking (for writeback pass)
-        impl_count = Signal(range(impl_fifo.fifo_depth + 1))
-        impl_count_next = Signal(range(impl_fifo.fifo_depth + 1))
-        wb_remaining = Signal(range(impl_fifo.fifo_depth + 1))
-        writeback_active = Signal()
-        wb_load = Signal()
-        m.d.comb += [
-            writeback_active.eq(0),
-            wb_load.eq(0),
-        ]
-
         # Transaction signals for in-flight counting
         do_inc = watch_mgr.clause_id_valid & watch_mgr.clause_id_ready
         do_dec = evaluator.result_valid & evaluator.result_ready
-
-        # FIFO push/pop events
-        impl_push = (
-            evaluator.result_valid
-            & (evaluator.result_status == UNIT)
-            & evaluator.result_ready
-        )
-        ext_pop = impl_fifo.pop_valid & self.impl_ready & ~writeback_active
-
-        m.d.comb += impl_count_next.eq(impl_count)
-        with m.If(impl_push & ~ext_pop):
-            m.d.comb += impl_count_next.eq(impl_count + 1)
-        with m.Elif(ext_pop & ~impl_push):
-            m.d.comb += impl_count_next.eq(impl_count - 1)
 
         # --- In-flight counter ---
         with m.If(fsm_starting):
@@ -298,17 +271,6 @@ class BCPAccelerator(Elaboratable):
             m.d.sync += in_flight.eq(in_flight + 1)
         with m.Elif(do_dec & ~do_inc):
             m.d.sync += in_flight.eq(in_flight - 1)
-
-        # --- Implication count ---
-        m.d.sync += impl_count.eq(impl_count_next)
-
-        # --- Writeback remaining counter ---
-        with m.If(fsm_starting):
-            m.d.sync += wb_remaining.eq(0)
-        with m.Elif(wb_load):
-            m.d.sync += wb_remaining.eq(impl_count_next)
-        with m.Elif(writeback_active & impl_fifo.pop_valid & (wb_remaining != 0)):
-            m.d.sync += wb_remaining.eq(wb_remaining - 1)
 
         # --- Conflict latch (held until conflict_ack) ---
         with m.If(fsm_starting):
@@ -355,28 +317,9 @@ class BCPAccelerator(Elaboratable):
             with m.State("ACTIVE"):
                 m.d.comb += self.busy.eq(1)
 
-                # Conflict detected: skip compaction, go directly to DONE
                 with m.If(conflict_reg):
-                    with m.If(impl_count_next != 0):
-                        m.d.comb += wb_load.eq(1)
-                        m.next = "WRITEBACK"
-                    with m.Else():
-                        m.next = "DONE"
-                # Normal completion: WLM done and all clauses drained
-                with m.Elif((wlm_done_seen | watch_mgr.done)
-                            & (in_flight == 0)):
-                    with m.If(impl_count_next != 0):
-                        m.d.comb += wb_load.eq(1)
-                        m.next = "WRITEBACK"
-                    with m.Else():
-                        m.next = "DONE"
-
-            with m.State("WRITEBACK"):
-                m.d.comb += [
-                    self.busy.eq(1),
-                    writeback_active.eq(1),
-                ]
-                with m.If(wb_remaining == 0):
+                    m.next = "DONE"
+                with m.Elif((wlm_done_seen | watch_mgr.done) & (in_flight == 0)):
                     m.next = "DONE"
 
             with m.State("DONE"):
@@ -388,54 +331,41 @@ class BCPAccelerator(Elaboratable):
                     m.next = "IDLE"
 
         # =============================================================
-        # Implication FIFO writeback (post-processing)
+        # Implication FIFO wiring
         # =============================================================
 
-        wb_pop = Signal()
-        m.d.comb += wb_pop.eq(writeback_active & impl_fifo.pop_valid & (wb_remaining != 0))
+        impl_push = Signal()
+        m.d.comb += impl_push.eq(
+            evaluator.result_valid
+            & (evaluator.result_status == UNIT)
+            & evaluator.result_ready)
 
-        fifo_push_valid = Signal()
-        fifo_push_var = Signal(range(MAX_VARS))
-        fifo_push_value = Signal()
-        fifo_push_reason = Signal(range(MAX_CLAUSES))
-        fifo_pop_ready = Signal()
+        m.d.comb += [
+            impl_fifo.push_valid.eq(impl_push),
+            impl_fifo.push_var.eq(evaluator.result_implied_var),
+            impl_fifo.push_value.eq(evaluator.result_implied_val),
+            impl_fifo.push_reason.eq(evaluator.result_clause_id),
+            impl_fifo.pop_ready.eq(self.impl_ready),
+        ]
 
-        with m.If(writeback_active):
+        # Auto-writeback: write implied assignment to assign_mem the same cycle
+        # the implication is pushed to the FIFO.  The evaluator spends one cycle
+        # in IDLE before picking up the next clause, so the synchronous write
+        # settles before the next EVAL read — no stall required.
+        auto_wr_data = Signal(2)
+        m.d.comb += auto_wr_data.eq(Mux(evaluator.result_implied_val, TRUE, FALSE))
+
+        with m.If(impl_push):
             m.d.comb += [
-                fifo_push_valid.eq(wb_pop),
-                fifo_push_var.eq(impl_fifo.pop_var),
-                fifo_push_value.eq(impl_fifo.pop_value),
-                fifo_push_reason.eq(impl_fifo.pop_reason),
-                fifo_pop_ready.eq(wb_pop),
+                assign_mem.wr_en.eq(1),
+                assign_mem.wr_addr.eq(evaluator.result_implied_var),
+                assign_mem.wr_data.eq(auto_wr_data),
             ]
         with m.Else():
             m.d.comb += [
-                fifo_push_valid.eq(
-                    evaluator.result_valid
-                    & (evaluator.result_status == UNIT)
-                    & evaluator.result_ready),
-                fifo_push_var.eq(evaluator.result_implied_var),
-                fifo_push_value.eq(evaluator.result_implied_val),
-                fifo_push_reason.eq(evaluator.result_clause_id),
-                fifo_pop_ready.eq(self.impl_ready),
+                assign_mem.wr_en.eq(self.assign_wr_en),
+                assign_mem.wr_addr.eq(self.assign_wr_addr),
+                assign_mem.wr_data.eq(self.assign_wr_data),
             ]
-
-        m.d.comb += [
-            impl_fifo.push_valid.eq(fifo_push_valid),
-            impl_fifo.push_var.eq(fifo_push_var),
-            impl_fifo.push_value.eq(fifo_push_value),
-            impl_fifo.push_reason.eq(fifo_push_reason),
-            impl_fifo.pop_ready.eq(fifo_pop_ready),
-        ]
-
-        auto_assign_en = wb_pop
-        auto_assign_val = Signal(2)
-        m.d.comb += auto_assign_val.eq(Mux(impl_fifo.pop_value, TRUE, FALSE))
-
-        m.d.comb += [
-            assign_mem.wr_addr.eq(Mux(auto_assign_en, impl_fifo.pop_var, self.assign_wr_addr)),
-            assign_mem.wr_data.eq(Mux(auto_assign_en, auto_assign_val, self.assign_wr_data)),
-            assign_mem.wr_en.eq(Mux(auto_assign_en, 1, self.assign_wr_en)),
-        ]
 
         return m

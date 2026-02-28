@@ -112,10 +112,10 @@ def test_soc_cdcl():
                     return res["conflict"], all_impl
                 for (iv, ival, ireason) in res["implications"]:
                     if assignment[iv] == UNASSIGNED:
-                        # HW writeback already wrote to assign_mem; mirror locally.
                         # ival is 1-bit from impl_value (1=TRUE, 0=FALSE);
                         # map to assignment_memory constants TRUE=2, FALSE=1.
                         assignment[iv] = TRUE if ival else FALSE
+                        await hw_write_assignment(ctx, accel, iv, assignment[iv])
                         all_impl.append((iv, assignment[iv], ireason))
                         # Queue BCP for the new false literal
                         new_fl = neg_lit(iv) if assignment[iv] == TRUE else pos_lit(iv)

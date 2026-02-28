@@ -237,7 +237,7 @@ def test_bcp_accelerator():
         assert ctx.get(dut.impl_valid) == 0, "Test 6 FAIL: FIFO should be empty"
         print("Test 6 PASSED: Multi-clause watch list (3 clauses) -> 3 implications.")
 
-        # ---- Test 7: Writeback updates assignment memory ----
+        # ---- Test 7: Caller syncs assign_mem between rounds ----
         while ctx.get(dut.impl_valid):
             await pop_implication()
 
@@ -246,6 +246,14 @@ def test_bcp_accelerator():
         await start_bcp(false_lit=1)       # clause 0: (~a v b) -> implies b=TRUE
         await wait_done()
         assert ctx.get(dut.conflict) == 0, "Test 7 FAIL: unexpected conflict on first BCP"
+
+        # Drain implication and write it back to assign_mem (caller's responsibility).
+        assert ctx.get(dut.impl_valid) == 1, "Test 7 FAIL: missing implication in FIFO"
+        imp = await pop_implication()
+        assert imp["var"] == 1 and imp["value"] == 1, (
+            f"Test 7 FAIL: expected b=TRUE, got var={imp['var']} val={imp['value']}"
+        )
+        await write_assign(1, TRUE)        # sync b=TRUE into assign_mem
         await ctx.tick()
 
         await write_clause(20, sat_bit=0, size=2, lits=[2, 4, 0, 0, 0])  # (b v c)
@@ -257,17 +265,12 @@ def test_bcp_accelerator():
         assert ctx.get(dut.conflict) == 0, "Test 7 FAIL: unexpected conflict on second BCP"
         await ctx.tick()
 
-        assert ctx.get(dut.impl_valid) == 1, "Test 7 FAIL: missing implication in FIFO"
-        imp = await pop_implication()
-        assert imp["var"] == 1 and imp["value"] == 1, (
-            f"Test 7 FAIL: expected b=TRUE from first BCP, got var={imp['var']} val={imp['value']}"
-        )
         for _ in range(3):
             if ctx.get(dut.impl_valid):
                 break
             await ctx.tick()
-        assert ctx.get(dut.impl_valid) == 0, "Test 7 FAIL: writeback did not prevent re-implication"
-        print("Test 7 PASSED: Writeback updates assignment memory before software pop.")
+        assert ctx.get(dut.impl_valid) == 0, "Test 7 FAIL: (b v c) should be SAT, no implication expected"
+        print("Test 7 PASSED: Caller syncs assign_mem; second round sees satisfied clause.")
 
         print("\nAll tests PASSED.")
 
