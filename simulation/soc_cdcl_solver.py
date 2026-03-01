@@ -349,42 +349,6 @@ class CDCLSolver:
         await self._sync_hw_assigns()
 
     # ------------------------------------------------------------------
-    # HW implication verification
-    # ------------------------------------------------------------------
-
-    def _implication_valid(self, var, value, reason):
-        """SW-verify a HW implication: reason clause must be genuinely unit.
-
-        The BCPAccelerator pipeline reads assignment memory combinationally
-        during EVAL state. Clauses evaluated in the same BCP round see
-        in-flight implications as UNASSIGNED (assign_mem is only updated via
-        the host write port between BCP rounds), producing spurious unit
-        propagations. This check re-evaluates the reason clause against the
-        current SW state to discard those phantoms before they corrupt the
-        trail.
-        """
-        if reason < 0:
-            return True
-        if reason >= len(self.clauses):
-            return False
-        c = self.clauses[reason]
-        unassigned_lit = None
-        for lit in c.lits:
-            v = self._lit_value(lit)
-            if v == TRUE:
-                return False
-            if v == UNASSIGNED:
-                if unassigned_lit is not None:
-                    return False
-                unassigned_lit = lit
-        if unassigned_lit is None:
-            return False
-        if lit_var(unassigned_lit) != var:
-            return False
-        expected_value = 0 if (unassigned_lit & 1) else 1
-        return expected_value == value
-
-    # ------------------------------------------------------------------
     # Propagation
     # ------------------------------------------------------------------
 
@@ -399,16 +363,13 @@ class CDCLSolver:
             conflict_cid = result["conflict"]
 
             if conflict_cid >= 0:
-                # Apply pending implications before verifying the conflict.
-                # HW auto-writeback keeps assign_mem current within a BCP round,
-                # but self.assigns lags until _enqueue is called.  Verifying the
-                # conflict clause against stale SW state would incorrectly discard
-                # genuine conflicts where the conflicting variable was implied
-                # earlier in the same round.
+                # Apply all implications before verifying the conflict so that
+                # self.assigns is fully in sync for the SW verification.
+                # With auto-writeback, every accepted implication immediately
+                # updates assign_mem, so there is no stale-read hazard within
+                # a BCP round and no SW filtering is required.
                 for var, value, reason in result["implications"]:
                     if self.assigns[var] != UNASSIGNED:
-                        continue
-                    if not self._implication_valid(var, value, reason):
                         continue
                     code = (var << 1) | (0 if value == 1 else 1)
                     await self._enqueue(code, reason)
@@ -422,17 +383,14 @@ class CDCLSolver:
 
             sw_conflict = -1
             for var, value, reason in result["implications"]:
-                if sw_conflict >= 0:
-                    continue
                 if self.assigns[var] != UNASSIGNED:
                     expected = TRUE if value == 1 else FALSE
-                    if self.assigns[var] != expected:
+                    if self.assigns[var] != expected and sw_conflict < 0:
                         sw_conflict = reason
                     continue
-                if not self._implication_valid(var, value, reason):
-                    continue
-                code = (var << 1) | (0 if value == 1 else 1)
-                await self._enqueue(code, reason)
+                if sw_conflict < 0:
+                    code = (var << 1) | (0 if value == 1 else 1)
+                    await self._enqueue(code, reason)
 
             if sw_conflict >= 0:
                 return sw_conflict

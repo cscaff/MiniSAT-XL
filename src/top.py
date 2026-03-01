@@ -338,7 +338,8 @@ class BCPAccelerator(Elaboratable):
         m.d.comb += impl_push.eq(
             evaluator.result_valid
             & (evaluator.result_status == UNIT)
-            & evaluator.result_ready)
+            & evaluator.result_ready
+            & ~conflict_reg)
 
         m.d.comb += [
             impl_fifo.push_valid.eq(impl_push),
